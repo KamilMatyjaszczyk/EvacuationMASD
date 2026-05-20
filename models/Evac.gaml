@@ -16,9 +16,9 @@ global {
 	int guard_no_guest_cycles_before_exit <- 20;
 
 	float people_speed <- 15.0;
-	float danger_distance <- 40.0;
-	float fire_spread_proba <- 0.050;
-	float guest_exit_detection_distance <- 20.0;
+	float danger_distance <- 200.0;
+	float fire_spread_proba <- 0.01;
+	float guest_exit_detection_distance <- 45.0;
 	float guard_instruction_distance <- 45.0;
 	float guard_vision_distance <- 80.0;
 	float guest_wander_speed <- 8.0;
@@ -36,6 +36,7 @@ global {
 	predicate fireDanger <- new_predicate("fireDanger");
 	predicate panicking <- new_predicate("panicking");
 	predicate fleeFire <- new_predicate("fleeFire");
+	predicate gregarism <- new_predicate("gregarism");
 
 	init {
 		write "===== INIT STARTED =====";
@@ -233,6 +234,7 @@ species person skills: [moving] control: simple_bdi {
 	evac_exit target_exit <- nil;
 	evac_cell target_cell <- nil;
 	evac_cell wander_cell <- nil;
+	
 
 	bool knows_exit <- false;
 	bool evacuated <- false;
@@ -250,6 +252,13 @@ species person skills: [moving] control: simple_bdi {
 	bool has_fire_danger_belief <- false;
 	bool has_panicking_belief <- false;
 	float flee_target_distance <- 70.0;
+	
+	//gregarism
+	float crowd_vision_distance <- 45.0;
+	person crowd_leader <- nil;
+	bool has_crowd_belief <- false;
+	evac_exit crowd_target_exit <- nil;
+	evac_cell crowd_target_cell <- nil;
 
 	action init_person {
 		list<evac_cell> spawn_cells <- evac_cell where each.can_spawn;
@@ -424,29 +433,6 @@ species person skills: [moving] control: simple_bdi {
 		}
 	}
 	
-	action choose_flee_cell {
-	list<building> burning_buildings <- building where each.on_fire;
-
-	if !empty(burning_buildings) {
-		building nearest_fire <- burning_buildings closest_to self.location;
-		point fire_location <- nearest_fire.location;
-
-		list<evac_cell> possible_cells <- evac_cell where (
-			each.walkable
-			and (each.location distance_to self.location < flee_target_distance)
-			and (each.location distance_to fire_location > self.location distance_to fire_location)
-		);
-
-		if empty(possible_cells) {
-			possible_cells <- evac_cell where each.walkable;
-		}
-
-		if !empty(possible_cells) {
-			wander_cell <- possible_cells farthest_to fire_location;
-		}
-	}
-}
-
 	action move_to_target_exit {
 		if target_cell != nil {
 			float current_speed <- people_speed;
@@ -460,9 +446,73 @@ species person skills: [moving] control: simple_bdi {
 				speed: current_speed
 				recompute_path: true;
 	
-			if self.location distance_to target_cell.location <12.0 {
+			if target_exit != nil and self.location distance_to target_exit.location < 18.0 {
 				evacuated <- true;
 				do die;
+			} else if self.location distance_to target_cell.location < 12.0 {
+				evacuated <- true;
+				do die;
+			}
+		}
+	}
+
+	action follow_crowd {
+		if crowd_leader = nil or dead(crowd_leader) {
+			if crowd_target_exit != nil and crowd_target_cell != nil {
+				target_exit <- crowd_target_exit;
+				target_cell <- crowd_target_cell;
+				knows_exit <- true;
+				wander_cell <- nil;
+				crowd_leader <- nil;
+				has_crowd_belief <- false;
+	
+				do add_belief(exitKnown);
+			} else {
+				crowd_leader <- nil;
+				has_crowd_belief <- false;
+				wander_cell <- nil;
+			}
+		} else {
+			float follow_speed <- guest_wander_speed + panic * panic_speed_bonus;
+	
+			do goto target: crowd_leader.location
+				on: (evac_cell where each.walkable)
+				speed: follow_speed
+				recompute_path: true;
+	
+			if crowd_leader.knows_exit and (self.location distance_to crowd_leader.location < 10.0) {
+				target_exit <- crowd_leader.target_exit;
+				target_cell <- crowd_leader.target_cell;
+				knows_exit <- true;
+				wander_cell <- nil;
+				crowd_leader <- nil;
+				has_crowd_belief <- false;
+	
+				do add_belief(exitKnown);
+			}
+		}
+	}
+		
+	reflex guest_perceive_evacuating_crowd
+	when: role = "guest" and !evacuated and !knows_exit {
+		point guest_location <- self.location;
+	
+		list<person> visible_evacuating_guests <- person where (
+			each.role = "guest"
+			and !each.evacuated
+			and each.knows_exit
+			and each.target_cell != nil
+			and (each.location distance_to guest_location < crowd_vision_distance)
+		);
+	
+		if !empty(visible_evacuating_guests) {
+			crowd_leader <- visible_evacuating_guests closest_to self.location;
+			crowd_target_exit <- crowd_leader.target_exit;
+			crowd_target_cell <- crowd_leader.target_cell;
+	
+			if !has_crowd_belief {
+				do add_belief(gregarism);
+				has_crowd_belief <- true;
 			}
 		}
 	}
@@ -481,13 +531,18 @@ species person skills: [moving] control: simple_bdi {
 					wander_cell <- nil;
 		
 					do remove_belief(exitKnown);
+					do remove_desire(evacuate);
+					do remove_intention(evacuate);
+		
 					do add_belief(fireDanger);
+					do add_desire(predicate: fleeFire, strength: 1.0);
 				}
 			}
 		}
-		 	
+				 	
 	reflex guest_perceive_fire_danger
-	when: role = "guest" and !evacuated {
+	when: role = "guest" and !evacuated
+	 {
 		list<building> burning_buildings <- building where each.on_fire;
 	
 		if !empty(burning_buildings) {
@@ -576,6 +631,11 @@ species person skills: [moving] control: simple_bdi {
 		new_desire: fleeFire
 		remove_desire: waitForGuidance
 		remove_intention: waitForGuidance;
+		
+	rule belief: gregarism
+		new_desire: gregarism
+		remove_desire: waitForGuidance
+		remove_intention: waitForGuidance;
 	
 	plan guest_wanders_until_exit_known intention: waitForGuidance
 	priority: 1
@@ -613,20 +673,47 @@ species person skills: [moving] control: simple_bdi {
 	finished_when: evacuated {
 		do move_to_target_exit;
 	}
+	
+	plan guest_follows_crowd intention: gregarism
+	priority: 60
+	when: role = "guest" and !evacuated and !knows_exit and crowd_leader != nil
+	finished_when: evacuated or knows_exit or crowd_leader = nil {
+		do follow_crowd;
+	}
 
-	aspect default {
-		if role = "guard" {
-			if guard_can_evacuate {
-				draw circle(3) color: #purple border: #black;
-			} else {
-				draw circle(3) color: #cyan border: #black;
-			}
-		} else if knows_exit {
-			draw circle(2) color: #green border: #black;
+aspect default {
+	if role = "guard" {
+		if guard_can_evacuate {
+			// Guard has finished guiding and is evacuating
+			draw circle(3) color: #purple border: #black;
 		} else {
+			// Guard is still patrolling/guiding
+			draw circle(3) color: #cyan border: #black;
+		}
+	} else {
+		if evacuated {
+			draw circle(2) color: #gray border: #black;
+		} else if knows_exit and panic >= panic_threshold {
+			// Guest knows exit, but is panicked
+			draw circle(2.7) color: #orange border: #black;
+		} else if knows_exit {
+			// Guest knows exit and evacuates normally
+			draw circle(2.4) color: #green border: #black;
+		} else if panic >= panic_threshold {
+			// Guest does not know exit and flees from fire
+			draw circle(2.7) color: #red border: #black;
+		} else if crowd_leader != nil {
+			// Guest follows another evacuating guest
+			draw circle(2.5) color: #yellow border: #black;
+		} else if has_fire_danger_belief {
+			// Guest has perceived fire danger, but is not fully panicked
+			draw circle(2.4) color: #pink border: #black;
+		} else {
+			// Guest has no exit knowledge and is wandering/waiting
 			draw circle(2) color: #blue border: #black;
 		}
 	}
+}
 }
 
 experiment Evacuation_MVP type: gui {
